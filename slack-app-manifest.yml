@@ -1,0 +1,25 @@
+# Slack: api.slack.com/apps -> Create New App -> From a manifest. Replace YOUR_PUBLIC_URL.
+display_information:
+  name: Aime Triage (test)
+features:
+  bot_user:
+    display_name: aime-triage
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      - channels:history   # receive message events in public channels
+      - groups:history     # ...and private channels, if the test channel is private
+      - chat:write         # post approval requests
+settings:
+  event_subscriptions:
+    request_url: https://YOUR_PUBLIC_URL/slack/events
+    bot_events:
+      - message.channels
+      - message.groups
+  interactivity:
+    is_enabled: true
+    request_url: https://YOUR_PUBLIC_URL/slack/interactions
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false   # set true to exercise the refresh path (needs client id/secret + refresh token)
