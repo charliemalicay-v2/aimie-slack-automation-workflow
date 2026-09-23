@@ -1,4 +1,4 @@
-"""Structured classification via the Anthropic Messages API.
+"""Structured classification via a local Ollama server.
 
 Structured output = a forced tool call whose input schema is generated from a Pydantic
 model. We still validate the result ourselves, because "the model was told the schema"
@@ -19,7 +19,6 @@ from app.retry import RetryableError, call_with_retry, parse_retry_after
 
 log = logging.getLogger(__name__)
 
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 TOOL_NAME = "record_classification"
 
 SYSTEM_PROMPT = """You triage messages from a Slack channel for an operations team.
@@ -42,14 +41,18 @@ class ClassificationResult(BaseModel):
 
 
 TOOL = {
-    "name": TOOL_NAME,
-    "description": "Record the triage label for the Slack message.",
-    "input_schema": ClassificationResult.model_json_schema(),
+    "type": "function",
+    "function": {
+        "name": TOOL_NAME,
+        "description": "Record the triage label for the Slack message.",
+        "parameters": ClassificationResult.model_json_schema(),
+    },
 }
 
 
 class LLMAuthError(Exception):
-    """401/403: bad or expired API key. Retrying won't help; needs a human."""
+    """Unrecoverable config/connection problem (model not found, server unreachable
+    after retries, refused connection). Retrying won't help; needs a human."""
 
 
 class MalformedOutput(Exception):
@@ -74,11 +77,11 @@ def fallback_result(error: str) -> ClassificationResult:
     )
 
 
-class AnthropicClassifier:
-    def __init__(self, api_key: str, model: str, http: httpx.Client, *,
+class OllamaClassifier:
+    def __init__(self, base_url: str, model: str, http: httpx.Client, *,
                  http_max_attempts: int = 4, validation_attempts: int = 2,
                  sleep: Callable[[float], None] = time.sleep):
-        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
         self.model = model
         self.http = http
         self.http_max_attempts = http_max_attempts
@@ -110,25 +113,22 @@ class AnthropicClassifier:
     def _request(self, messages: list[dict]) -> dict:
         payload = {
             "model": self.model,
-            "max_tokens": 400,
-            "temperature": 0,
-            "system": SYSTEM_PROMPT,
+            "stream": False,
+            "options": {"temperature": 0},
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *messages],
             "tools": [TOOL],
-            "tool_choice": {"type": "tool", "name": TOOL_NAME},
-            "messages": messages,
         }
-        headers = {"x-api-key": self.api_key, "anthropic-version": "2023-06-01",
-                   "content-type": "application/json"}
 
         def once() -> dict:
             try:
-                resp = self.http.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=30.0)
-            except httpx.TransportError as exc:  # timeouts, connection resets
+                resp = self.http.post(f"{self.base_url}/api/chat", json=payload, timeout=120.0)
+            except httpx.TransportError as exc:  # server not running yet, timeouts, connection resets
                 raise RetryableError(f"transport error: {exc}") from exc
-            if resp.status_code in (401, 403):
-                raise LLMAuthError(f"Anthropic auth failed ({resp.status_code})")
-            if resp.status_code == 429 or resp.status_code >= 500:  # includes 529 overloaded
-                raise RetryableError(f"Anthropic HTTP {resp.status_code}",
+            if resp.status_code == 404:
+                raise LLMAuthError(f"Ollama model '{self.model}' not found "
+                                   f"(run: ollama pull {self.model})")
+            if resp.status_code == 429 or resp.status_code >= 500:
+                raise RetryableError(f"Ollama HTTP {resp.status_code}",
                                      retry_after=parse_retry_after(resp.headers.get("retry-after")))
             resp.raise_for_status()  # other 4xx = our bug; don't retry
             try:
@@ -137,18 +137,24 @@ class AnthropicClassifier:
                 raise MalformedOutput("response body was not JSON") from exc
 
         return call_with_retry(once, max_attempts=self.http_max_attempts,
-                               label="anthropic.messages", sleep=self.sleep)
+                               label="ollama.chat", sleep=self.sleep)
 
     @staticmethod
     def _parse(body: dict) -> ClassificationResult:
-        blocks = body.get("content") if isinstance(body, dict) else None
-        if not isinstance(blocks, list):
-            raise MalformedOutput("missing content blocks")
-        tool_input = next((b.get("input") for b in blocks
-                           if isinstance(b, dict) and b.get("type") == "tool_use"
-                           and b.get("name") == TOOL_NAME), None)
-        if tool_input is None:
-            raise MalformedOutput("no record_classification tool call in response")
+        message = body.get("message") if isinstance(body, dict) else None
+        tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+        if not isinstance(tool_calls, list) or not tool_calls:
+            raise MalformedOutput("no tool call in response")
+        call = next((c for c in tool_calls
+                    if isinstance(c, dict) and c.get("function", {}).get("name") == TOOL_NAME), None)
+        if call is None:
+            raise MalformedOutput(f"no {TOOL_NAME} tool call in response")
+        tool_input = call["function"].get("arguments")
+        if isinstance(tool_input, str):
+            try:
+                tool_input = json.loads(tool_input)
+            except json.JSONDecodeError as exc:
+                raise MalformedOutput("tool arguments were not valid JSON") from exc
         try:
             return ClassificationResult.model_validate(tool_input)
         except ValidationError as exc:

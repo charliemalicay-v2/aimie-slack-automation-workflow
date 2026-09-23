@@ -15,7 +15,7 @@ from app.config import Settings
 from app.llm import ClassifierOutcome, LLMAuthError
 from app.models import ApprovalRequest, Classification, SlackEvent
 from app.retry import RetriesExhausted
-from app.slack_client import SlackAPIError, SlackAuthError, approval_blocks
+from app.slack_client import SlackAPIError, SlackAuthError, approval_blocks, decided_blocks
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ class Classifier(Protocol):
 
 class ApprovalPoster(Protocol):
     def post_message(self, channel: str, text: str, blocks: list[dict] | None = None) -> dict: ...
+    def update_message(self, channel: str, ts: str, text: str, blocks: list[dict] | None = None) -> dict: ...
 
 
 @dataclass
@@ -208,7 +209,33 @@ class Pipeline:
             audit(s, f"approval.{new_status}", "approval", approval_id, actor=user_id,
                   executed=False, note="approval-only mode: no action taken")
             s.commit()
-            return new_status
+
+            event = s.get(SlackEvent, approval.event_pk)
+            classification = s.scalar(select(Classification).where(Classification.event_pk == approval.event_pk))
+            slack_ts = approval.slack_message_ts
+            label, proposed_action = approval.label, approval.proposed_action
+
+        # Slack update is outside the DB transaction: the decision is recorded even if Slack is down.
+        if slack_ts:
+            self._update_approval_message(approval_id, slack_ts, event.text, label,
+                                          classification.reason if classification else "",
+                                          proposed_action, classification.is_fallback if classification else False,
+                                          new_status, user_id)
+        return new_status
+
+    def _update_approval_message(self, approval_id: int, slack_ts: str, text: str, label: str, reason: str,
+                                 proposed_action: str, is_fallback: bool, decision: str, actor_id: str) -> None:
+        try:
+            self.slack.update_message(
+                self.settings.slack_approval_channel_id, slack_ts,
+                text=f"Approval needed ({label}): {proposed_action} — {decision} by <@{actor_id}>",
+                blocks=decided_blocks(approval_id, label, text, reason, proposed_action, is_fallback,
+                                      decision, actor_id),
+            )
+        except (SlackAuthError, SlackAPIError, RetriesExhausted) as exc:
+            with self.sf() as s:
+                audit(s, "approval.message_update_failed", "approval", approval_id, error=repr(exc))
+                s.commit()
 
     # ---- 4. recovery ------------------------------------------------------------
     def reprocess_pending(self) -> int:

@@ -1,4 +1,4 @@
-"""One retry policy shared by the Slack and Anthropic clients."""
+"""One retry policy shared by the Slack and Ollama clients."""
 from __future__ import annotations
 
 import logging

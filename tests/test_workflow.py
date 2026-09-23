@@ -116,7 +116,7 @@ def test_process_is_idempotent(client, session_factory, fake_classifier):
     assert count(session_factory, ApprovalRequest) == 1
 
 
-def test_approve_records_decision_without_executing(client, session_factory):
+def test_approve_records_decision_without_executing(client, session_factory, fake_slack):
     post_event(client, envelope())
     r = post_interaction(client, approval_id=1, action_id="approve", user="U42")
     assert r.json()["result"] == "approved"
@@ -125,6 +125,25 @@ def test_approve_records_decision_without_executing(client, session_factory):
         assert (a.status, a.decided_by) == ("approved", "U42")
         log = s.scalars(select(AuditLog).where(AuditLog.action == "approval.approved")).one()
         assert log.actor == "U42" and log.details["executed"] is False
+    assert len(fake_slack.updates) == 1  # the original message got edited to show the decision
+    update = fake_slack.updates[0]
+    assert update["ts"] == "1700000000.000100"
+    assert "Approved" in update["blocks"][-1]["elements"][0]["text"]
+    assert "U42" in update["blocks"][-1]["elements"][0]["text"]
+
+
+def test_reject_also_updates_the_message(client, session_factory, fake_slack):
+    post_event(client, envelope())
+    post_interaction(client, approval_id=1, action_id="reject", user="U42")
+    assert len(fake_slack.updates) == 1
+    assert "Rejected" in fake_slack.updates[0]["blocks"][-1]["elements"][0]["text"]
+
+
+def test_double_click_does_not_update_message_twice(client, session_factory, fake_slack):
+    post_event(client, envelope())
+    post_interaction(client, 1, "approve")
+    post_interaction(client, 1, "reject")
+    assert len(fake_slack.updates) == 1  # second (ignored) decision doesn't touch Slack again
 
 
 def test_double_click_is_ignored(client, session_factory):

@@ -15,7 +15,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.config import Settings, load_settings
 from app.db import Base, make_engine, make_session_factory
-from app.llm import AnthropicClassifier
+from app.llm import OllamaClassifier
 from app.models import ApprovalRequest, SlackEvent
 from app.pipeline import ApprovalPoster, Classifier, Pipeline
 from app.slack_client import SlackClient, TokenStore
@@ -35,8 +35,8 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker |
     engine = session_factory.kw["bind"]
 
     http = httpx.Client()
-    classifier = classifier or AnthropicClassifier(
-        settings.anthropic_api_key, settings.anthropic_model, http,
+    classifier = classifier or OllamaClassifier(
+        settings.ollama_base_url, settings.ollama_model, http,
         http_max_attempts=settings.http_max_attempts,
         validation_attempts=settings.llm_validation_attempts)
     slack = slack or SlackClient(
@@ -114,7 +114,7 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker |
         missing = settings.missing_required()
         checks["config"] = "ok" if not missing else f"missing: {', '.join(missing)}"
         healthy = all(v == "ok" for v in checks.values())
-        # No calls to Slack/Anthropic here: health checks run often and shouldn't burn rate limits.
+        # No calls to Slack/Ollama here: health checks run often and shouldn't burn resources.
         return JSONResponse(status_code=200 if healthy else 503, content={
             "status": "ok" if healthy else "degraded", "version": VERSION,
             "checks": checks, "backlog": backlog})

@@ -26,7 +26,7 @@ TEST_CHANNEL = "C0TEST"
 def settings() -> Settings:
     return Settings(database_url="sqlite://", slack_signing_secret=SECRET,
                     slack_test_channel_id=TEST_CHANNEL, slack_approval_channel_id="C0APPROVE",
-                    slack_bot_token="xoxb-test", anthropic_api_key="sk-test")
+                    slack_bot_token="xoxb-test", ollama_base_url="http://localhost:11434")
 
 
 # Default: in-memory SQLite. Set TEST_DATABASE_URL to run the same suite against Postgres,
@@ -61,13 +61,19 @@ class FakeClassifier:
 
 class FakeSlack:
     def __init__(self, exc: Exception | None = None):
-        self.exc, self.posts = exc, []
+        self.exc, self.posts, self.updates = exc, [], []
 
     def post_message(self, channel, text, blocks=None):
         if self.exc:
             raise self.exc
         self.posts.append({"channel": channel, "text": text, "blocks": blocks})
         return {"ok": True, "ts": "1700000000.000100"}
+
+    def update_message(self, channel, ts, text, blocks=None):
+        if self.exc:
+            raise self.exc
+        self.updates.append({"channel": channel, "ts": ts, "text": text, "blocks": blocks})
+        return {"ok": True, "ts": ts}
 
 
 @pytest.fixture

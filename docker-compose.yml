@@ -1,12 +1,16 @@
-# Local stack: app + a Postgres that stands in for Supabase.
+# Local stack: app + a Postgres that stands in for Supabase + a local Ollama LLM server.
 # To use Supabase instead, remove the `db` service and set DATABASE_URL in .env.
+# First run: `docker compose up --build` then `docker compose exec ollama ollama pull llama3.1`
+# (or whatever OLLAMA_MODEL is set to) before sending events, or classification will 404.
+# db is published on host port 5433 (not 5432) to avoid clashing with any Postgres already
+# running natively on your machine or in another WSL distro.
 services:
   db:
     image: postgres:16
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: triage
-    ports: ["5432:5432"]
+    ports: ["5433:5432"]
     volumes:
       - ./sql/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
       - pgdata:/var/lib/postgresql/data
@@ -15,11 +19,18 @@ services:
       interval: 5s
       retries: 10
 
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
+    volumes:
+      - ollama_models:/root/.ollama
+
   app:
     build: .
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/triage
+      OLLAMA_BASE_URL: http://ollama:11434
     ports: ["8000:8000"]
     depends_on:
       db:
@@ -27,3 +38,4 @@ services:
 
 volumes:
   pgdata:
+  ollama_models:

@@ -20,8 +20,8 @@ class Settings:
     slack_refresh_token: str | None = None
     slack_client_id: str | None = None
     slack_client_secret: str | None = None
-    anthropic_api_key: str = ""
-    anthropic_model: str = "claude-haiku-4-5-20251001"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3.1"
     http_max_attempts: int = 4          # per HTTP call, for 429/5xx/timeouts
     llm_validation_attempts: int = 2    # 1 normal try + 1 "repair" try for malformed output
     create_noise_approvals: bool = False
@@ -33,7 +33,7 @@ class Settings:
             "SLACK_SIGNING_SECRET": self.slack_signing_secret,
             "SLACK_TEST_CHANNEL_ID": self.slack_test_channel_id,
             "SLACK_BOT_TOKEN": self.slack_bot_token,
-            "ANTHROPIC_API_KEY": self.anthropic_api_key,
+            "OLLAMA_BASE_URL": self.ollama_base_url,
         }
         return [k for k, v in required.items() if not v]
 
@@ -49,8 +49,8 @@ def load_settings() -> Settings:
         slack_refresh_token=_env("SLACK_REFRESH_TOKEN"),
         slack_client_id=_env("SLACK_CLIENT_ID"),
         slack_client_secret=_env("SLACK_CLIENT_SECRET"),
-        anthropic_api_key=_env("ANTHROPIC_API_KEY", "") or "",
-        anthropic_model=_env("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
+        ollama_base_url=_env("OLLAMA_BASE_URL", "http://localhost:11434") or "",
+        ollama_model=_env("OLLAMA_MODEL", "llama3.1"),
         http_max_attempts=int(_env("HTTP_MAX_ATTEMPTS", "4")),
         llm_validation_attempts=int(_env("LLM_VALIDATION_ATTEMPTS", "2")),
         create_noise_approvals=(_env("CREATE_NOISE_APPROVALS", "false") or "").lower() == "true",

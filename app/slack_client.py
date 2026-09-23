@@ -81,6 +81,9 @@ class SlackClient:
     def post_message(self, channel: str, text: str, blocks: list[dict] | None = None) -> dict:
         return self.call("chat.postMessage", {"channel": channel, "text": text, "blocks": blocks or []})
 
+    def update_message(self, channel: str, ts: str, text: str, blocks: list[dict] | None = None) -> dict:
+        return self.call("chat.update", {"channel": channel, "ts": ts, "text": text, "blocks": blocks or []})
+
     def call(self, method: str, payload: dict) -> dict:
         self._refresh_if_expiring()
         try:
@@ -146,18 +149,33 @@ class SlackClient:
         return call_with_retry(once, max_attempts=self.max_attempts, label=f"slack.{method}", sleep=self.sleep)
 
 
-def approval_blocks(approval_id: int, label: str, text: str, reason: str, proposed_action: str,
-                    is_fallback: bool) -> list[dict]:
+def _approval_section(approval_id: int, label: str, text: str, reason: str, proposed_action: str,
+                      is_fallback: bool) -> dict:
     emoji = {"urgent": ":rotating_light:", "action": ":memo:", "noise": ":zzz:"}.get(label, "")
     note = "\n:warning: AI output was invalid, so this defaulted to human review." if is_fallback else ""
+    return {"type": "section", "text": {"type": "mrkdwn", "text":
+        f"{emoji} *Approval needed* ({label})\n>{text[:500]}\n*Why:* {reason}\n"
+        f"*Proposed action (not executed):* {proposed_action}{note}"}}
+
+
+def approval_blocks(approval_id: int, label: str, text: str, reason: str, proposed_action: str,
+                    is_fallback: bool) -> list[dict]:
     return [
-        {"type": "section", "text": {"type": "mrkdwn", "text":
-            f"{emoji} *Approval needed* ({label})\n>{text[:500]}\n*Why:* {reason}\n"
-            f"*Proposed action (not executed):* {proposed_action}{note}"}},
+        _approval_section(approval_id, label, text, reason, proposed_action, is_fallback),
         {"type": "actions", "block_id": f"approval_{approval_id}", "elements": [
             {"type": "button", "action_id": "approve", "style": "primary",
              "text": {"type": "plain_text", "text": "Approve"}, "value": str(approval_id)},
             {"type": "button", "action_id": "reject", "style": "danger",
              "text": {"type": "plain_text", "text": "Reject"}, "value": str(approval_id)},
         ]},
+    ]
+
+
+def decided_blocks(approval_id: int, label: str, text: str, reason: str, proposed_action: str,
+                   is_fallback: bool, decision: str, actor_id: str) -> list[dict]:
+    decision_emoji = ":white_check_mark:" if decision == "approved" else ":x:"
+    return [
+        _approval_section(approval_id, label, text, reason, proposed_action, is_fallback),
+        {"type": "context", "elements": [{"type": "mrkdwn",
+            "text": f"{decision_emoji} *{decision.capitalize()}* by <@{actor_id}>"}]},
     ]

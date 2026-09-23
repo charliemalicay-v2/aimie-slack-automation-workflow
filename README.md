@@ -1,13 +1,13 @@
 # Aime Slack Triage
 
-Receives Slack messages from one test channel, stores each one exactly once in Supabase/Postgres, has Claude label it `urgent` / `action` / `noise` via structured output, and posts an **approval request** to Slack. It never takes the proposed action; approving or rejecting only records the decision.
+Receives Slack messages from one test channel, stores each one exactly once in Supabase/Postgres, has a local LLM (via [Ollama](https://ollama.com)) label it `urgent` / `action` / `noise` via structured output, and posts an **approval request** to Slack. It never takes the proposed action; approving or rejecting only records the decision. No external AI API key is needed — classification runs entirely on your machine.
 
 ```mermaid
 flowchart LR
   S[Slack event] -->|signed POST| E[/slack/events/]
   E -->|verify HMAC, filter, insert| DB[(Postgres)]
   E -->|200 within 3s| S
-  E -.background.-> C[Claude: forced tool call + Pydantic validation]
+  E -.background.-> C[Ollama: forced tool call + Pydantic validation]
   C --> A[approval_requests: pending]
   A --> P[Slack message with Approve / Reject]
   P -->|click| I[/slack/interactions/] -->|status + audit only| DB
@@ -20,12 +20,14 @@ flowchart LR
 pip install -r requirements-dev.txt
 pytest
 
-# Same suite against real Postgres
-TEST_DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/triage_test pytest
+# Same suite against real Postgres (docker-compose publishes db on host port 5433, not
+# 5432, to avoid clashing with a Postgres already running natively on your machine)
+TEST_DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5433/triage_test pytest
 
-# Local stack (Postgres stands in for Supabase)
-cp .env.example .env              # fill in Slack + Anthropic values
+# Local stack (Postgres stands in for Supabase, Ollama serves the LLM)
+cp .env.example .env              # fill in Slack values; Ollama defaults work as-is
 docker compose up --build
+docker compose exec ollama ollama pull llama3.1   # first run only, pulls the model
 curl localhost:8000/health
 
 # Fake a signed Slack event (no Slack app needed); send twice to see dedupe
@@ -33,6 +35,8 @@ SLACK_SIGNING_SECRET=... python -m scripts.send_test_event --text "Checkout is r
 ```
 
 **Supabase:** run `sql/schema.sql` in the SQL editor, set `DATABASE_URL` to the pooler connection string with the `postgresql+psycopg://` prefix, and drop the `db` service from compose.
+
+**Ollama without Docker:** install from [ollama.com/download](https://ollama.com/download), run `ollama pull llama3.1`, then `ollama serve` (or it's already running as a background service after install). Leave `OLLAMA_BASE_URL=http://localhost:11434` in `.env`.
 
 **Slack:** create the app from `slack-app-manifest.yml`, expose port 8000 with a tunnel (`cloudflared tunnel --url http://localhost:8000` or ngrok), put that URL in the manifest, install the app, and invite the bot to the test channel.
 
@@ -53,10 +57,10 @@ SLACK_SIGNING_SECRET=... python -m scripts.send_test_event --text "Checkout is r
 | Structured AI output | Forced tool call whose schema comes from the `ClassificationResult` Pydantic model (`extra="forbid"`, enum label, 0–1 confidence), then validated again in code. |
 | Malformed AI responses | One repair retry that tells the model what was wrong; if that fails too, a fallback labels it `action` with confidence 0 and `is_fallback=true`, so it goes to a human instead of being dropped. |
 | Rate limits | Shared `call_with_retry`: honors `Retry-After` on 429, exponential backoff with jitter for 5xx/529/timeouts. If retries run out, the event goes to `retry_pending` and `python -m scripts.reprocess` picks it up. |
-| Expired tokens | Slack `token_expired` triggers one refresh via `oauth.v2.access` (token rotation). The new token pair is persisted, and the app also refreshes proactively when a token is within 5 minutes of expiry. Revoked or invalid tokens and Anthropic 401s fail fast and are audited. |
+| Expired tokens | Slack `token_expired` triggers one refresh via `oauth.v2.access` (token rotation). The new token pair is persisted, and the app also refreshes proactively when a token is within 5 minutes of expiry. Revoked or invalid tokens and a missing Ollama model (404) fail fast and are audited. |
 | Approval, not action | `approval_requests` table + Slack buttons. `decide()` only changes status. Double clicks are no-ops. |
 | Audit log | Written in the same transaction as the change it describes. A Postgres trigger makes it append-only. |
-| Health check | `/health` plus a Docker `HEALTHCHECK`. It does not call Slack or Anthropic, so it cannot burn rate limits. |
+| Health check | `/health` plus a Docker `HEALTHCHECK`. It does not call Slack or Ollama, so it cannot burn resources. |
 
 ## Design notes and next steps
 
